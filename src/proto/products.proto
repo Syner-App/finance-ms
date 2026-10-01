@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package products;
+
+// Field names are snake_case end to end (proto-loader keepCase + ts-proto
+// snakeToCamel=false) so they match the Prisma columns.
+// Every request carries organization_id: the organization of the authenticated caller,
+// set by client-gateway from the token verified by auth-ms. Rows of other organizations
+// are never visible (a foreign id is NOT_FOUND)
+service ProductsService {
+  rpc Create (CreateProductRequest) returns (Product);
+  rpc FindAll (FindProductsRequest) returns (ProductList);
+  rpc FindOne (ProductById) returns (Product);
+  rpc Update (UpdateProductRequest) returns (Product);
+  rpc Remove (ProductById) returns (Product);
+  rpc AdjustStock (AdjustStockRequest) returns (Product);
+  rpc FindAlerts (FindAlertsRequest) returns (AlertList);
+}
+
+enum TypeCategory {
+  Bebidas = 0;
+  Lacteos = 1;
+  Snacks = 2;
+  Limpieza = 3;
+  Frutas = 4;
+  Granos = 5;
+}
+
+enum TypeProductHistory {
+  entrada = 0;
+  salida = 1;
+}
+
+enum TypeAlert {
+  STOCK_BAJO = 0;
+}
+
+enum StatusAlert {
+  ACTIVA = 0;
+  RESUELTA = 1;
+}
+
+message ProductById {
+  int32 id = 1;
+  string organization_id = 2;
+}
+
+message CreateProductRequest {
+  string nombre = 1;
+  string codigo_sku = 2;
+  TypeCategory categoria = 3;
+  int32 precio = 4;
+  optional int32 stock_actual = 5;
+  optional int32 stock_minimo = 6;
+  string proveedor = 7;
+  string organization_id = 8;
+}
+
+// Stock is only changed through AdjustStock
+message UpdateProductRequest {
+  int32 id = 1;
+  optional string nombre = 2;
+  optional string codigo_sku = 3;
+  optional TypeCategory categoria = 4;
+  optional int32 precio = 5;
+  optional int32 stock_minimo = 6;
+  optional string proveedor = 7;
+  string organization_id = 8;
+}
+
+message FindProductsRequest {
+  optional int32 page = 1;
+  optional int32 limit = 2;
+  optional TypeCategory categoria = 3;
+  optional string proveedor = 4;
+  optional string nombre = 5;
+  optional bool activo = 6;
+  optional bool stock_bajo = 7;
+  string organization_id = 8;
+}
+
+message AdjustStockRequest {
+  int32 id = 1;
+  TypeProductHistory tipo = 2;
+  int32 cantidad = 3;
+  string motivo = 4;
+  string organization_id = 5;
+}
+
+message FindAlertsRequest {
+  optional int32 page = 1;
+  optional int32 limit = 2;
+  optional StatusAlert estado = 3;
+  string organization_id = 4;
+}
+
+message Product {
+  int32 id = 1;
+  string nombre = 2;
+  string codigo_sku = 3;
+  TypeCategory categoria = 4;
+  int32 precio = 5;
+  int32 stock_actual = 6;
+  int32 stock_minimo = 7;
+  string proveedor = 8;
+  bool activo = 9;
+  string createdAt = 10;
+  optional string updatedAt = 11;
+}
+
+message Alert {
+  string id = 1;
+  TypeAlert tipo = 2;
+  StatusAlert estado = 3;
+  string descripcion = 4;
+  int32 product_id = 5;
+  string createdAt = 6;
+  optional string updatedAt = 7;
+}
+
+message PaginationMeta {
+  int32 total = 1;
+  int32 page = 2;
+  int32 lastPage = 3;
+}
+
+message ProductList {
+  repeated Product data = 1;
+  PaginationMeta meta = 2;
+}
+
+message AlertList {
+  repeated Alert data = 1;
+  PaginationMeta meta = 2;
+}

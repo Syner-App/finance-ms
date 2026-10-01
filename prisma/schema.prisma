@@ -1,0 +1,312 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Enum values match src/proto/finance.proto (string enums end to end)
+enum Account {
+  CAJA
+  BANCO
+  RESERVA
+}
+
+enum TypeMovement {
+  INGRESO
+  EGRESO
+}
+
+enum MovementCategory {
+  VENTAS
+  MATERIA_PRIMA
+  EMPAQUES
+  TRANSPORTE
+  SERVICIOS
+  ARRIENDO
+  SALARIOS
+  PUBLICIDAD
+  OTROS_OPERATIVOS
+  CUOTA_CREDITO
+  ABONO_EXTRAORDINARIO
+  RETIRO_PROPIETARIO
+  APORTE_PROPIETARIO
+  TRASLADO_RESERVA
+}
+
+enum StatusMovement {
+  PAGADO
+  PENDIENTE
+}
+
+enum StatusStockDeduction {
+  STOCK_PENDIENTE
+  STOCK_APLICADO
+  STOCK_RECHAZADO
+}
+
+enum StatusPayable {
+  POR_PAGAR
+  PAGADA
+}
+
+enum StatusPeriod {
+  ABIERTO
+  CERRADO
+}
+
+// Every table but outbox_events carries organization_id (the auth-ms organization, a Mongo
+// ObjectId) and is protected by the tenant_isolation RLS policy (see the init migration).
+// Money is in whole pesos
+
+// Every peso that enters or leaves the business. The category fixes its nature (operating,
+// financial, owner or internal: src/common/categories.ts), so a withdrawal can never be
+// recorded as an expense
+model Movement {
+  id                String           @id @default(uuid())
+  organization_id   String           @db.VarChar(24)
+  tipo              TypeMovement
+  categoria         MovementCategory
+  monto             Int              @db.Integer
+  // Accrual month (YYYY-MM): the income statement of that period includes the movement
+  periodo           String           @db.Char(7)
+  fecha             DateTime         @db.Date
+  estado            StatusMovement
+  // Unset while PENDIENTE: only paid movements change the balance of an account
+  cuenta            Account?
+  pagado_en         DateTime?        @db.Date
+  descripcion       String?          @db.VarChar
+  // Withdrawal forced above the distributable profit
+  descapitalizacion Boolean          @default(false)
+  // Record that generated the movement (sale, payable, credit)
+  referencia_id     String?          @db.VarChar(36)
+  createdAt         DateTime         @default(now()) @db.Timestamp
+  updatedAt         DateTime?        @updatedAt @db.Timestamp
+
+  @@index([organization_id, periodo])
+  @@index([organization_id, estado])
+  @@index([organization_id, cuenta])
+  @@map("movimientos")
+}
+
+// A products-ms product used by the recipes. products-ms keeps the stock; this keeps its
+// cost in pesos. producto_id has no @relation: it lives in another database
+model Supply {
+  id                Int              @id @default(autoincrement())
+  organization_id   String           @db.VarChar(24)
+  producto_id       Int              @db.Integer
+  // Product name when it was linked
+  nombre            String           @db.VarChar
+  // MATERIA_PRIMA or EMPAQUES
+  categoria         MovementCategory
+  // Pesos per unit of the products-ms product (the unit its stock counts)
+  costo_unitario    Decimal          @db.Decimal(14, 4)
+  // Fraction consumed by sales and not discounted from the products-ms stock yet (< 1)
+  consumo_pendiente Decimal          @default(0) @db.Decimal(14, 4)
+  createdAt         DateTime         @default(now()) @db.Timestamp
+  updatedAt         DateTime?        @updatedAt @db.Timestamp
+
+  costos SupplyCost[]
+  items  RecipeItem[]
+
+  @@unique([organization_id, producto_id])
+  @@map("insumos")
+}
+
+model SupplyCost {
+  id              String   @id @default(uuid())
+  organization_id String   @db.VarChar(24)
+  costo_unitario  Decimal  @db.Decimal(14, 4)
+  // MANUAL or the payable that set it
+  origen          String   @db.VarChar
+  createdAt       DateTime @default(now()) @db.Timestamp
+
+  supply    Supply @relation(fields: [supply_id], references: [id], onDelete: Cascade)
+  supply_id Int
+
+  @@index([supply_id, createdAt])
+  @@map("costos_insumo")
+}
+
+// A product the business sells (e.g. granizado 12 oz)
+model Recipe {
+  id              Int       @id @default(autoincrement())
+  organization_id String    @db.VarChar(24)
+  nombre          String    @db.VarChar
+  precio_venta    Int       @db.Integer
+  activo          Boolean   @default(true)
+  createdAt       DateTime  @default(now()) @db.Timestamp
+  updatedAt       DateTime? @updatedAt @db.Timestamp
+
+  items RecipeItem[]
+  lines SaleLine[]
+
+  @@unique([organization_id, nombre])
+  @@map("recetas")
+}
+
+model RecipeItem {
+  id              Int     @id @default(autoincrement())
+  organization_id String  @db.VarChar(24)
+  // In units of the products-ms product, per unit sold
+  cantidad        Decimal @db.Decimal(14, 4)
+
+  recipe    Recipe @relation(fields: [recipe_id], references: [id], onDelete: Cascade)
+  recipe_id Int
+  supply    Supply @relation(fields: [supply_id], references: [id], onDelete: Restrict)
+  supply_id Int
+
+  @@unique([recipe_id, supply_id])
+  @@map("receta_insumos")
+}
+
+model Sale {
+  id              String               @id @default(uuid())
+  organization_id String               @db.VarChar(24)
+  fecha           DateTime             @db.Date
+  periodo         String               @db.Char(7)
+  cuenta          Account
+  total           Int                  @db.Integer
+  // Cost of the goods sold, with the recipe costs of the day of the sale
+  costo_total     Int                  @db.Integer
+  estado_stock    StatusStockDeduction @default(STOCK_PENDIENTE)
+  motivo_rechazo  String?              @db.VarChar
+  // [{ producto_id, cantidad }]: whole units sent to products-ms (finance.sale.registered)
+  consumos        Json
+  createdAt       DateTime             @default(now()) @db.Timestamp
+  updatedAt       DateTime?            @updatedAt @db.Timestamp
+
+  lines SaleLine[]
+
+  @@index([organization_id, fecha])
+  @@index([organization_id, estado_stock])
+  @@map("ventas")
+}
+
+model SaleLine {
+  id              Int     @id @default(autoincrement())
+  organization_id String  @db.VarChar(24)
+  unidades        Int     @db.Integer
+  precio_unitario Int     @db.Integer
+  costo_unitario  Decimal @db.Decimal(14, 4)
+
+  sale      Sale   @relation(fields: [sale_id], references: [id], onDelete: Cascade)
+  sale_id   String
+  recipe    Recipe @relation(fields: [recipe_id], references: [id], onDelete: Restrict)
+  recipe_id Int
+
+  @@index([sale_id])
+  @@map("venta_lineas")
+}
+
+// A received purchase order (purchase-order.received from orders-ms) waiting to be paid.
+// purchase_order_id makes the event idempotent
+model Payable {
+  id                String        @id @default(uuid())
+  organization_id   String        @db.VarChar(24)
+  purchase_order_id String        @db.Uuid
+  producto_id       Int           @db.Integer
+  // Unset when the product is not linked as a supply
+  supply_id         Int?          @db.Integer
+  cantidad          Int           @db.Integer
+  // cantidad x costo_unitario of the supply; unset while it has no cost
+  monto_estimado    Int?          @db.Integer
+  monto_real        Int?          @db.Integer
+  estado            StatusPayable @default(POR_PAGAR)
+  fecha_recepcion   DateTime      @db.Date
+  periodo           String        @db.Char(7)
+  pagada_en         DateTime?     @db.Date
+  createdAt         DateTime      @default(now()) @db.Timestamp
+  updatedAt         DateTime?     @updatedAt @db.Timestamp
+
+  @@unique([organization_id, purchase_order_id])
+  @@index([organization_id, estado])
+  @@map("cuentas_por_pagar")
+}
+
+model Credit {
+  id              String    @id @default(uuid())
+  organization_id String    @db.VarChar(24)
+  nombre          String    @db.VarChar
+  saldo_capital   Int       @db.Integer
+  cuota_mensual   Int       @db.Integer
+  // Part of the installment the business pays
+  cuota_asignada  Int       @db.Integer
+  dia_pago        Int       @db.Integer
+  activo          Boolean   @default(true)
+  createdAt       DateTime  @default(now()) @db.Timestamp
+  updatedAt       DateTime? @updatedAt @db.Timestamp
+
+  @@index([organization_id, activo])
+  @@map("creditos")
+}
+
+// Break-even assumptions; the version in force is the latest vigente_desde <= today
+model Assumptions {
+  id                      String   @id @default(uuid())
+  organization_id         String   @db.VarChar(24)
+  vigente_desde           DateTime @db.Date
+  precio_promedio         Int      @db.Integer
+  // Unset: computed from the recipes
+  costo_variable_unitario Int?     @db.Integer
+  arriendo                Int      @db.Integer
+  servicios               Int      @db.Integer
+  salarios                Int      @db.Integer
+  otros_fijos             Int      @db.Integer
+  dias_operacion          Int      @db.Integer
+  inversion_inicial       Int      @db.Integer
+  createdAt               DateTime @default(now()) @db.Timestamp
+
+  @@unique([organization_id, vigente_desde])
+  @@map("supuestos_equilibrio")
+}
+
+// One row per organization; missing = the defaults below
+model Policy {
+  organization_id      String             @id @db.VarChar(24)
+  dias_cobertura       Int                @default(7) @db.Integer
+  meses_reserva        Decimal            @default(1) @db.Decimal(5, 2)
+  porcentaje_retiro    Int                @default(50) @db.Integer
+  niveles_escenario    Int[]              @default([30, 50, 75, 100, 150])
+  categorias_variables MovementCategory[] @default([MATERIA_PRIMA, EMPAQUES, TRANSPORTE])
+  updatedAt            DateTime?          @updatedAt @db.Timestamp
+
+  @@map("politicas")
+}
+
+// Missing = ABIERTO. A closed period keeps the figures it had when it was closed (resumen)
+model Period {
+  id               String       @id @default(uuid())
+  organization_id  String       @db.VarChar(24)
+  periodo          String       @db.Char(7)
+  estado           StatusPeriod
+  resumen          Json?
+  cerrado_en       DateTime?    @db.Timestamp
+  reabierto_motivo String?      @db.VarChar
+  updatedAt        DateTime?    @updatedAt @db.Timestamp
+
+  @@unique([organization_id, periodo])
+  @@map("periodos")
+}
+
+// Transactional outbox: events are written with the business change and
+// published to RabbitMQ by OutboxRelay. No RLS: the relay publishes every
+// organization's events, and each payload carries its organization_id
+model OutboxEvent {
+  id          Int       @id @default(autoincrement())
+  pattern     String
+  payload     Json
+  attempts    Int       @default(0)
+  lastError   String?
+  createdAt   DateTime  @default(now())
+  publishedAt DateTime?
+
+  @@index([publishedAt, id])
+  @@map("outbox_events")
+}

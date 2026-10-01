@@ -1,0 +1,6 @@
+allowBuilds:
+  '@prisma/engines': true
+  prisma: true
+  protobufjs: true
+  grpc-tools: true
+  esbuild: true

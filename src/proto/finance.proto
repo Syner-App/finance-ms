@@ -1,0 +1,630 @@
+syntax = "proto3";
+
+package finance;
+
+// Field names are snake_case end to end (proto-loader keepCase + ts-proto
+// snakeToCamel=false) so they match the Prisma columns.
+// Every request carries organization_id: the organization of the authenticated caller,
+// set by client-gateway from the token verified by auth-ms. Rows of other organizations
+// are never visible (a foreign id is NOT_FOUND).
+// Money is in whole pesos (int64, loaded as Number with `longs: Number`); quantities of
+// supplies and unit costs are doubles. Dates are YYYY-MM-DD and periods YYYY-MM
+service FinanceService {
+  // Ledger
+  rpc RegisterExpense (RegisterExpenseRequest) returns (Movement);
+  rpc PayExpense (PayExpenseRequest) returns (Movement);
+  rpc RegisterContribution (RegisterContributionRequest) returns (Movement);
+  rpc TransferReserve (TransferReserveRequest) returns (MovementList);
+  rpc FindMovements (FindMovementsRequest) returns (MovementList);
+
+  // Supplies (linked to products-ms products) and recipes
+  rpc UpsertSupply (UpsertSupplyRequest) returns (Supply);
+  rpc FindSupplies (OrganizationRequest) returns (SupplyList);
+  rpc CreateRecipe (CreateRecipeRequest) returns (Recipe);
+  rpc UpdateRecipe (UpdateRecipeRequest) returns (Recipe);
+  rpc FindRecipes (OrganizationRequest) returns (RecipeList);
+
+  // Sales: each one discounts its supplies from the products-ms stock (finance.sale.registered)
+  rpc RegisterSale (RegisterSaleRequest) returns (Sale);
+  rpc FindSales (FindSalesRequest) returns (SaleList);
+  rpc RetrySaleStock (SaleById) returns (Sale);
+
+  // Payables: created from purchase-order.received (orders-ms)
+  rpc FindPayables (FindPayablesRequest) returns (PayableList);
+  rpc PayPayable (PayPayableRequest) returns (Payable);
+
+  // Credit
+  rpc CreateCredit (CreateCreditRequest) returns (Credit);
+  rpc FindCredits (OrganizationRequest) returns (CreditList);
+  rpc PayInstallment (PayInstallmentRequest) returns (Credit);
+  rpc PrepayCredit (PrepayCreditRequest) returns (Credit);
+
+  // Planning
+  rpc SetAssumptions (SetAssumptionsRequest) returns (Assumptions);
+  rpc GetAssumptions (OrganizationRequest) returns (Assumptions);
+  rpc GetPolicy (OrganizationRequest) returns (Policy);
+  rpc UpdatePolicy (UpdatePolicyRequest) returns (Policy);
+
+  // Treasury and reports
+  rpc GetIncomeStatement (PeriodRequest) returns (IncomeStatement);
+  rpc GetWaterfall (OrganizationRequest) returns (Waterfall);
+  rpc RegisterWithdrawal (RegisterWithdrawalRequest) returns (Movement);
+  rpc GetBreakEven (OrganizationRequest) returns (BreakEven);
+  rpc GetScenarios (ScenariosRequest) returns (ScenarioList);
+  rpc GetDashboard (OrganizationRequest) returns (Dashboard);
+  rpc ClosePeriod (PeriodRequest) returns (Period);
+  rpc ReopenPeriod (ReopenPeriodRequest) returns (Period);
+}
+
+// Enum values share the package scope, so they are unique across enums
+enum Account {
+  CAJA = 0;
+  BANCO = 1;
+  RESERVA = 2; // money set aside; not operating cash
+}
+
+enum TypeMovement {
+  INGRESO = 0;
+  EGRESO = 1;
+}
+
+enum MovementCategory {
+  VENTAS = 0;
+  MATERIA_PRIMA = 1;
+  EMPAQUES = 2; // cups, lids, straws, packaging
+  TRANSPORTE = 3;
+  SERVICIOS = 4;
+  ARRIENDO = 5;
+  SALARIOS = 6;
+  PUBLICIDAD = 7;
+  OTROS_OPERATIVOS = 8;
+  CUOTA_CREDITO = 9;
+  ABONO_EXTRAORDINARIO = 10;
+  RETIRO_PROPIETARIO = 11;
+  APORTE_PROPIETARIO = 12;
+  TRASLADO_RESERVA = 13;
+}
+
+enum StatusMovement {
+  PAGADO = 0;
+  PENDIENTE = 1;
+}
+
+enum StatusStockDeduction {
+  STOCK_PENDIENTE = 0;
+  STOCK_APLICADO = 1;
+  STOCK_RECHAZADO = 2;
+}
+
+enum StatusPayable {
+  POR_PAGAR = 0;
+  PAGADA = 1;
+}
+
+enum StatusPeriod {
+  ABIERTO = 0;
+  CERRADO = 1;
+}
+
+enum ScenarioResult {
+  PERDIDA = 0;
+  CUBRE_OPERACION = 1; // covers the operation but not the credit installment
+  GANANCIA = 2;
+}
+
+message OrganizationRequest {
+  string organization_id = 1;
+}
+
+message PaginationMeta {
+  int32 total = 1;
+  int32 page = 2;
+  int32 lastPage = 3;
+}
+
+// ---------------------------------------------------------------- Ledger
+
+message Movement {
+  string id = 1;
+  TypeMovement tipo = 2;
+  MovementCategory categoria = 3;
+  int64 monto = 4;
+  string periodo = 5;
+  string fecha = 6;
+  StatusMovement estado = 7;
+  optional Account cuenta = 8;
+  optional string pagado_en = 9;
+  optional string descripcion = 10;
+  bool descapitalizacion = 11;
+  optional string referencia_id = 12;
+  string createdAt = 13;
+}
+
+message MovementList {
+  repeated Movement data = 1;
+  PaginationMeta meta = 2;
+}
+
+// Operating expense. pagado=false leaves it PENDIENTE (accrued, not paid yet)
+message RegisterExpenseRequest {
+  string organization_id = 1;
+  MovementCategory categoria = 2;
+  int64 monto = 3;
+  optional string fecha = 4;
+  bool pagado = 5;
+  optional Account cuenta = 6;
+  optional string descripcion = 7;
+}
+
+message PayExpenseRequest {
+  string organization_id = 1;
+  string id = 2;
+  Account cuenta = 3;
+  optional string fecha = 4;
+}
+
+message RegisterContributionRequest {
+  string organization_id = 1;
+  int64 monto = 2;
+  Account cuenta = 3;
+  optional string fecha = 4;
+  optional string descripcion = 5;
+}
+
+// hacia_reserva=true moves money from cuenta (CAJA or BANCO) to RESERVA, false the other way
+message TransferReserveRequest {
+  string organization_id = 1;
+  int64 monto = 2;
+  Account cuenta = 3;
+  bool hacia_reserva = 4;
+  optional string fecha = 5;
+}
+
+message FindMovementsRequest {
+  string organization_id = 1;
+  optional string periodo = 2;
+  optional MovementCategory categoria = 3;
+  optional StatusMovement estado = 4;
+  optional int32 page = 5;
+  optional int32 limit = 6;
+}
+
+// ---------------------------------------------------------------- Supplies and recipes
+
+// costo_unitario: pesos per unit of the products-ms product (the unit its stock counts)
+message Supply {
+  int32 id = 1;
+  int32 producto_id = 2;
+  string nombre = 3;
+  MovementCategory categoria = 4;
+  double costo_unitario = 5;
+  double consumo_pendiente = 6;
+  string createdAt = 7;
+  optional string updatedAt = 8;
+}
+
+message SupplyList {
+  repeated Supply data = 1;
+}
+
+// categoria: MATERIA_PRIMA or EMPAQUES
+message UpsertSupplyRequest {
+  string organization_id = 1;
+  int32 producto_id = 2;
+  MovementCategory categoria = 3;
+  double costo_unitario = 4;
+}
+
+message RecipeItem {
+  int32 supply_id = 1;
+  int32 producto_id = 2;
+  string nombre = 3;
+  double cantidad = 4;
+  double costo = 5;
+}
+
+message Recipe {
+  int32 id = 1;
+  string nombre = 2;
+  int64 precio_venta = 3;
+  bool activo = 4;
+  double costo_unitario = 5;
+  double margen_unitario = 6;
+  repeated RecipeItem items = 7;
+}
+
+message RecipeList {
+  repeated Recipe data = 1;
+}
+
+message RecipeItemInput {
+  int32 supply_id = 1;
+  double cantidad = 2;
+}
+
+message CreateRecipeRequest {
+  string organization_id = 1;
+  string nombre = 2;
+  int64 precio_venta = 3;
+  repeated RecipeItemInput items = 4;
+}
+
+// Empty items keeps the current ones (a recipe always has at least one)
+message UpdateRecipeRequest {
+  string organization_id = 1;
+  int32 id = 2;
+  optional string nombre = 3;
+  optional int64 precio_venta = 4;
+  optional bool activo = 5;
+  repeated RecipeItemInput items = 6;
+}
+
+// ---------------------------------------------------------------- Sales
+
+message SaleLineInput {
+  int32 recipe_id = 1;
+  int32 unidades = 2;
+  optional int64 precio_unitario = 3; // defaults to the recipe price
+}
+
+message RegisterSaleRequest {
+  string organization_id = 1;
+  optional string fecha = 2;
+  Account cuenta = 3;
+  repeated SaleLineInput lineas = 4;
+}
+
+message SaleLine {
+  int32 recipe_id = 1;
+  string nombre = 2;
+  int32 unidades = 3;
+  int64 precio_unitario = 4;
+  double costo_unitario = 5;
+  int64 subtotal = 6;
+}
+
+// Whole units discounted from the products-ms stock
+message Consumption {
+  int32 producto_id = 1;
+  int32 cantidad = 2;
+}
+
+message Sale {
+  string id = 1;
+  string fecha = 2;
+  string periodo = 3;
+  Account cuenta = 4;
+  int64 total = 5;
+  int64 costo_total = 6;
+  StatusStockDeduction estado_stock = 7;
+  optional string motivo_rechazo = 8;
+  repeated SaleLine lineas = 9;
+  repeated Consumption consumos = 10;
+  string createdAt = 11;
+}
+
+message SaleList {
+  repeated Sale data = 1;
+  PaginationMeta meta = 2;
+}
+
+message FindSalesRequest {
+  string organization_id = 1;
+  optional string periodo = 2;
+  optional StatusStockDeduction estado_stock = 3;
+  optional int32 page = 4;
+  optional int32 limit = 5;
+}
+
+message SaleById {
+  string organization_id = 1;
+  string id = 2;
+}
+
+// ---------------------------------------------------------------- Payables
+
+message Payable {
+  string id = 1;
+  string purchase_order_id = 2;
+  int32 producto_id = 3;
+  optional int32 supply_id = 4;
+  optional string nombre = 5;
+  int32 cantidad = 6;
+  optional int64 monto_estimado = 7; // unset: the supply has no cost yet
+  optional int64 monto_real = 8;
+  StatusPayable estado = 9;
+  string fecha_recepcion = 10;
+  string periodo = 11;
+  optional string pagada_en = 12;
+  string createdAt = 13;
+}
+
+message PayableList {
+  repeated Payable data = 1;
+  PaginationMeta meta = 2;
+}
+
+message FindPayablesRequest {
+  string organization_id = 1;
+  optional StatusPayable estado = 2;
+  optional int32 page = 3;
+  optional int32 limit = 4;
+}
+
+message PayPayableRequest {
+  string organization_id = 1;
+  string id = 2;
+  int64 monto_real = 3;
+  Account cuenta = 4;
+  optional string fecha = 5;
+}
+
+// ---------------------------------------------------------------- Credit
+
+message Credit {
+  string id = 1;
+  string nombre = 2;
+  int64 saldo_capital = 3;
+  int64 cuota_mensual = 4;
+  int64 cuota_asignada = 5; // part of the installment the business pays
+  int32 dia_pago = 6;
+  bool activo = 7;
+  int64 cuota_pagada_periodo = 8;
+  int64 cuota_pendiente_periodo = 9;
+  string createdAt = 10;
+}
+
+message CreditList {
+  repeated Credit data = 1;
+}
+
+message CreateCreditRequest {
+  string organization_id = 1;
+  string nombre = 2;
+  int64 saldo_capital = 3;
+  int64 cuota_mensual = 4;
+  int64 cuota_asignada = 5;
+  int32 dia_pago = 6;
+}
+
+// abono_capital: part of the installment that reduces the principal (the rest is interest)
+message PayInstallmentRequest {
+  string organization_id = 1;
+  string id = 2;
+  Account cuenta = 3;
+  int64 monto = 4;
+  optional int64 abono_capital = 5;
+  optional string fecha = 6;
+}
+
+message PrepayCreditRequest {
+  string organization_id = 1;
+  string id = 2;
+  Account cuenta = 3;
+  int64 monto = 4;
+  optional string fecha = 5;
+}
+
+// ---------------------------------------------------------------- Planning
+
+message Assumptions {
+  string id = 1;
+  string vigente_desde = 2;
+  int64 precio_promedio = 3;
+  optional int64 costo_variable_unitario = 4; // unset: computed from the recipes
+  int64 arriendo = 5;
+  int64 servicios = 6;
+  int64 salarios = 7;
+  int64 otros_fijos = 8;
+  int32 dias_operacion = 9;
+  int64 inversion_inicial = 10;
+  int64 costos_fijos = 11;
+}
+
+message SetAssumptionsRequest {
+  string organization_id = 1;
+  optional string vigente_desde = 2;
+  int64 precio_promedio = 3;
+  optional int64 costo_variable_unitario = 4;
+  int64 arriendo = 5;
+  int64 servicios = 6;
+  int64 salarios = 7;
+  int64 otros_fijos = 8;
+  int32 dias_operacion = 9;
+  int64 inversion_inicial = 10;
+}
+
+message Policy {
+  int32 dias_cobertura = 1;
+  double meses_reserva = 2;
+  int32 porcentaje_retiro = 3; // suggested share of the surplus for withdrawals; the rest, prepayments
+  repeated int32 niveles_escenario = 4;
+  repeated MovementCategory categorias_variables = 5;
+}
+
+// Empty repeated fields keep the current values
+message UpdatePolicyRequest {
+  string organization_id = 1;
+  optional int32 dias_cobertura = 2;
+  optional double meses_reserva = 3;
+  optional int32 porcentaje_retiro = 4;
+  repeated int32 niveles_escenario = 5;
+  repeated MovementCategory categorias_variables = 6;
+}
+
+// ---------------------------------------------------------------- Treasury and reports
+
+message PeriodRequest {
+  string organization_id = 1;
+  optional string periodo = 2; // defaults to the current one
+}
+
+message ReopenPeriodRequest {
+  string organization_id = 1;
+  string periodo = 2;
+  string motivo = 3;
+}
+
+message Period {
+  string periodo = 1;
+  StatusPeriod estado = 2;
+  optional string cerrado_en = 3;
+  optional string reabierto_motivo = 4;
+}
+
+message CategoryAmount {
+  MovementCategory categoria = 1;
+  int64 monto = 2;
+}
+
+message IncomeStatement {
+  string periodo = 1;
+  bool cerrado = 2;
+  int64 ventas = 3;
+  int64 costos_variables = 4;
+  int64 margen_contribucion = 5;
+  int64 gastos_fijos = 6;
+  int64 utilidad_operativa = 7;
+  int64 cuota_credito = 8;
+  int64 flujo_disponible = 9;
+  int64 costo_de_lo_vendido = 10;
+  int32 unidades_vendidas = 11;
+  repeated CategoryAmount detalle = 12;
+  int32 cuentas_sin_valorar = 13;
+}
+
+message ReplenishmentItem {
+  int32 producto_id = 1;
+  string nombre = 2;
+  int32 stock_actual = 3;
+  int32 stock_minimo = 4;
+  int32 en_ordenes_abiertas = 5;
+  double consumo_diario = 6;
+  double necesidad = 7;
+  int32 faltante = 8;
+  int64 valor = 9;
+}
+
+message Waterfall {
+  int64 efectivo_caja = 1;
+  int64 efectivo_banco = 2;
+  int64 efectivo_operativo = 3;
+  int64 cuentas_por_pagar = 4;
+  int64 gastos_pendientes = 5;
+  int64 compromisos_compra = 6;
+  int64 pendientes = 7;
+  int64 reposicion_inventario = 8;
+  int64 cuota_pendiente = 9;
+  int64 capital_trabajo = 10;
+  int64 reserva_meta = 11;
+  int64 reserva_acumulada = 12;
+  int64 faltante_reserva = 13;
+  int64 excedente = 14;
+  int64 deficit = 15;
+  int64 utilidades_no_distribuidas = 16;
+  int64 utilidad_distribuible = 17;
+  int64 disponible_abono = 18;
+  bool abono_permitido = 19;
+  int64 sugerido_retiro = 20;
+  int64 sugerido_abono = 21;
+  bool inventario_estimado = 22; // products-ms/orders-ms did not answer: replenishment by formula
+  repeated ReplenishmentItem reposicion_detalle = 23;
+}
+
+// forzar: withdraw above the distributable profit (owner, with motivo); it is flagged
+// as descapitalizacion
+message RegisterWithdrawalRequest {
+  string organization_id = 1;
+  int64 monto = 2;
+  Account cuenta = 3;
+  optional string fecha = 4;
+  optional string descripcion = 5;
+  bool forzar = 6;
+  optional string motivo = 7;
+}
+
+message BreakEven {
+  int64 precio_promedio = 1;
+  double costo_variable_unitario = 2;
+  string cvu_origen = 3; // RECETAS | MANUAL
+  double margen_contribucion_unitario = 4;
+  double razon_contribucion = 5;
+  int64 costos_fijos = 6;
+  int32 dias_operacion = 7;
+  bool alcanzable = 8;
+  optional int64 pe_unidades = 9;
+  optional int64 pe_dinero = 10;
+  optional int64 pe_diario = 11;
+  int64 cuota_asignada = 12;
+  optional int64 pe_credito_unidades = 13;
+  optional int64 pe_credito_dinero = 14;
+  optional int64 pe_credito_diario = 15;
+  optional string mensaje = 16;
+}
+
+message ScenarioSupply {
+  int32 producto_id = 1;
+  string nombre = 2;
+  int32 cantidad_mensual = 3;
+  int64 costo_mensual = 4;
+}
+
+message Scenario {
+  int32 unidades_diarias = 1;
+  int64 unidades_mes = 2;
+  int64 ventas = 3;
+  int64 costos_variables = 4;
+  int64 gastos_fijos = 5;
+  int64 utilidad_operativa = 6;
+  int64 cuota_credito = 7;
+  int64 flujo_disponible = 8;
+  int64 aporte_reserva = 9;
+  int64 distribuible_estimado = 10;
+  optional double meses_recuperacion = 11;
+  ScenarioResult resultado = 12;
+  repeated ScenarioSupply insumos = 13;
+}
+
+message ScenariosRequest {
+  string organization_id = 1;
+  repeated int32 niveles = 2; // empty: the policy levels
+}
+
+message ScenarioList {
+  repeated Scenario data = 1;
+  BreakEven punto_equilibrio = 2;
+}
+
+message Recovery {
+  int64 inversion_inicial = 1;
+  int64 recuperado = 2;
+  optional double porcentaje = 3;
+  optional double meses_restantes = 4;
+}
+
+message FinanceAlert {
+  string codigo = 1;
+  string mensaje = 2;
+}
+
+// The five questions of the owner
+message Answers {
+  optional int64 vender_por_dia = 1;
+  optional int64 vender_por_dia_con_credito = 2;
+  int64 utilidad_operativa = 3;
+  int64 flujo_disponible = 4;
+  int64 dejar_en_el_negocio = 5;
+  int64 retiro_maximo = 6;
+  int64 abono_maximo = 7;
+}
+
+message Dashboard {
+  string periodo = 1;
+  IncomeStatement estado_resultados = 2;
+  BreakEven punto_equilibrio = 3; // unset until the assumptions are registered
+  Waterfall cascada = 4;
+  Recovery recuperacion = 5;
+  Answers respuestas = 6;
+  repeated FinanceAlert alertas = 7;
+  int64 inversion_inicial = 8;
+}
